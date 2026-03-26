@@ -1544,7 +1544,7 @@ def get_balance_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMark
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LANGUAGE, user_telegram_id: str = None) -> InlineKeyboardMarkup: # === MOD START === добавлена строка  user_telegram_id: str = None
     texts = get_texts(language)
     keyboard = []
     has_direct_payment_methods = False
@@ -1555,6 +1555,12 @@ def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LAN
         if amount_kopeks > 0:
             return f'topup_amount|{method}|{amount_kopeks}'
         return f'topup_{method}'
+
+    # Добавляем кнопку "Оплата картой" # === MOD START ===
+    if user_telegram_id:
+        site_url = f"https://pay.pk-masternsk.ru/?uid={user_telegram_id}"
+        keyboard.append([InlineKeyboardButton(text='💳 Оплата картой', url=site_url)])
+    # === MOD END ===
 
     if settings.TELEGRAM_STARS_ENABLED:
         keyboard.append(

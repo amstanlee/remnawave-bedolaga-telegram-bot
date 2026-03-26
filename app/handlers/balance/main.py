@@ -328,7 +328,7 @@ async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db:
 
     full_text = payment_text
 
-    keyboard = get_payment_methods_keyboard(amount_kopeks, db_user.language)
+    keyboard = get_payment_methods_keyboard(0, db_user.language, user_telegram_id=str(db_user.telegram_id)) # === MOD START ===
 
     # Если сообщение недоступно, отправляем новое
     if isinstance(callback.message, InaccessibleMessage):
