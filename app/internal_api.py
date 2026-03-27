@@ -21,7 +21,7 @@ class TopUpNotification(BaseModel):
     telegram_id: int
     amount_kopeks: int
     payment_id: str
-
+    balance_kopeks: int  # ← ДОБАВЛЕНО
 
 @router.post("/notify_topup")
 async def notify_topup(request: Request, payload: TopUpNotification):
@@ -42,13 +42,7 @@ async def notify_topup(request: Request, payload: TopUpNotification):
 
         # Обновляем баланс пользователя
         from app.database.crud.user import add_user_balance
-        new_balance = await add_user_balance(
-            session,
-            user,
-            payload.amount_kopeks,
-            description=f"Top-up from external service: {payload.payment_id}",
-            payment_method=PaymentMethod.YOOKASSA,  # ✅ передаём Enum, а не строку
-        )
+        new_balance = payload.balance_kopeks  # ← БЕРЁМ ГОТОВЫЙ БАЛАНС ОТ BACKEND
 
         # Получаем текущую подписку пользователя
         subscription = await get_subscription_by_user_id(session, user.id)

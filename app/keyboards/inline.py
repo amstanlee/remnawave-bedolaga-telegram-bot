@@ -1558,7 +1558,7 @@ def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LAN
 
     # Добавляем кнопку "Оплата картой" # === MOD START ===
     if user_telegram_id:
-        site_url = f"https://pay.pk-masternsk.ru/?uid={user_telegram_id}"
+        site_url = f"https://pay.vinced.ru/?uid={user_telegram_id}"
         keyboard.append([InlineKeyboardButton(text='💳 Оплата картой', url=site_url)])
     # === MOD END ===
 
