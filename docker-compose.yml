@@ -43,6 +43,7 @@ services:
   bot:
     build: .
     container_name: remnawave_bot
+    init: true   # Исправляет проблему зомби-процессов
     restart: unless-stopped
     depends_on:
       postgres:

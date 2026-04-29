@@ -363,14 +363,14 @@ async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db:
         cart_data = await user_cart_service.get_user_cart(db_user.id)
         if cart_data and cart_data.get('saved_cart'):
             missing = cart_data.get('missing_amount', 0)
-            if missing > 0:
-                amount_kopeks = missing
     except Exception:
         pass
 
     full_text = payment_text
 
-    keyboard = get_payment_methods_keyboard(0, db_user.language, user_telegram_id=str(db_user.telegram_id)) # === MOD START ===
+    keyboard = get_payment_methods_keyboard(
+        0, db_user.language, user_telegram_id=str(db_user.telegram_id)
+    )  # === MOD START ===
 
     # Если сообщение недоступно, отправляем новое
     if isinstance(callback.message, InaccessibleMessage):

@@ -588,6 +588,7 @@ async def main():
 
                 # 2. Подключаем внутренний API
                 from app.internal_api import router as internal_router
+
                 try:
                     web_app.include_router(internal_router)
                     logger.info('Internal API router mounted')

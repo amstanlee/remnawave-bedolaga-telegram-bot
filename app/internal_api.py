@@ -1,17 +1,16 @@
-from fastapi import APIRouter, Request, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
-from app.database.database import AsyncSessionLocal
-from app.database.crud.user import get_user_by_telegram_id, get_user_by_email
 from app.database.crud.subscription import get_subscription_by_user_id
-
+from app.database.crud.user import get_user_by_email, get_user_by_telegram_id
+from app.database.database import AsyncSessionLocal
+from app.services.referral_service import process_referral_topup
 from app.services.user_service import UserService
 
-from app.services.referral_service import process_referral_topup
 
-INTERNAL_API_TOKEN = "c4d347fb63cfec0f310bb80d27217606fb9b7734424e30976dcd5a2fcf7405cf"
+INTERNAL_API_TOKEN = 'c4d347fb63cfec0f310bb80d27217606fb9b7734424e30976dcd5a2fcf7405cf'
 
-router = APIRouter(prefix="/internal")
+router = APIRouter(prefix='/internal')
 
 
 class TopUpNotification(BaseModel):
@@ -22,26 +21,25 @@ class TopUpNotification(BaseModel):
     balance_kopeks: int
 
 
-@router.post("/notify_topup")
+@router.post('/notify_topup')
 async def notify_topup(request: Request, payload: TopUpNotification):
-    token = request.headers.get("X-Internal-Token")
+    token = request.headers.get('X-Internal-Token')
     if token != INTERNAL_API_TOKEN:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Forbidden')
 
     bot = request.app.state.bot
 
     async with AsyncSessionLocal() as session:
-
         # --- Находим пользователя ---
         if payload.telegram_id:
             user = await get_user_by_telegram_id(session, payload.telegram_id)
         elif payload.email:
             user = await get_user_by_email(session, payload.email)
         else:
-            raise HTTPException(400, "telegram_id or email required")
+            raise HTTPException(400, 'telegram_id or email required')
 
         if not user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
 
         # --- Обновляем баланс ---
         user.balance_kopeks = payload.balance_kopeks
@@ -58,7 +56,7 @@ async def notify_topup(request: Request, payload: TopUpNotification):
                 bot,
             )
         except Exception as error:
-            print("❌ Ошибка обработки реферального пополнения:", error)
+            print('❌ Ошибка обработки реферального пополнения:', error)
 
         # --- Уведомление пользователю ---
         user_service = UserService()
@@ -72,6 +70,5 @@ async def notify_topup(request: Request, payload: TopUpNotification):
         await session.commit()
 
         if success:
-            return {"status": "ok", "message": "Notification sent successfully"}
-        else:
-            return {"status": "ok", "message": "Balance updated but notification failed"}
+            return {'status': 'ok', 'message': 'Notification sent successfully'}
+        return {'status': 'ok', 'message': 'Balance updated but notification failed'}
