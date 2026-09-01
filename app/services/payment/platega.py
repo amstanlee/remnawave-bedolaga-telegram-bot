@@ -192,6 +192,12 @@ class PlategaPaymentMixin:
                 'status': existing.status,
             }
 
+        # Взаимоисключение с рекуррентом Lava: оба движка push-модели, и две
+        # живые привязки на одной подписке списывали бы дважды за цикл.
+        from app.services.payment.lava import cancel_lava_recurring_for_subscription_safe
+
+        await cancel_lava_recurring_for_subscription_safe(db, subscription.id)
+
         period_days = (
             resolve_autopay_period_candidate(getattr(subscription, 'autopay_period_days', None), tariff)
             or resolve_autopay_period_candidate(getattr(settings, 'DEFAULT_AUTOPAY_PERIOD_DAYS', 0), tariff)
@@ -201,7 +207,31 @@ class PlategaPaymentMixin:
         is_daily = bool(getattr(tariff, 'is_daily', False))
         interval, charge_days = resolve_platega_interval(period_days, is_daily)
 
-        amount_kopeks = tariff.get_purchasable_price_for_period(charge_days)
+        # Сумма — полная цена продления, а не голая цена периода: у подписки
+        # могут быть докупленные устройства (в классическом режиме — ещё и
+        # трафик/серверы), и балансовое автопродление списывает именно с ними.
+        # Голая цена периода недобирала бы разницу при каждом списании.
+        # user=None намеренно: временные промо-скидки в повторяющемся списании
+        # не замораживаем (см. docstring), поэтому считаем «чистую» цену
+        # тарифа за период плюс доп. устройства.
+        amount_kopeks = 0
+        try:
+            from app.services.pricing_engine import pricing_engine
+
+            pricing_result = await pricing_engine.calculate_tariff_purchase_price(
+                tariff,
+                charge_days,
+                device_limit=getattr(subscription, 'device_limit', None),
+            )
+            amount_kopeks = int(pricing_result.final_total or 0)
+        except Exception as pricing_error:  # pragma: no cover - defensive
+            logger.warning(
+                'Не удалось посчитать цену с доп. устройствами — берём голую цену периода',
+                error=str(pricing_error),
+            )
+        # Фолбэк на прежнее поведение: голая цена периода без доплат.
+        if amount_kopeks <= 0:
+            amount_kopeks = tariff.get_purchasable_price_for_period(charge_days)
         # Нулевая цена отклоняется наравне с отсутствующей: подписка Platega на
         # 0 ₽ бессмысленна и вела бы к пустым регулярным «списаниям».
         if not amount_kopeks:
@@ -377,9 +407,13 @@ class PlategaPaymentMixin:
         from app.database.crud import platega_subscription as sub_crud
         from app.services import platega_recurrent as pr
 
-        status = payload.get('Status')
-        platega_id = payload.get('SubscriptionId')
-        charge_id = payload.get('Id')
+        # Регистр ключей у Platega разный: разовые коллбеки приходят в
+        # camelCase, примеры подписочных в спеке — в PascalCase. Читаем
+        # через общий разбор, иначе списание не находит свою подписку.
+        fields = pr.read_callback_fields(payload)
+        status = fields.status
+        platega_id = fields.subscription_id
+        charge_id = fields.charge_id
 
         if not platega_id:
             logger.warning('Platega subscription callback без SubscriptionId', status=status)
@@ -411,7 +445,7 @@ class PlategaPaymentMixin:
             await self._notify_sbp_recurring(db, record, 'activated')
             return
 
-        if status in pr.CHARGE_SUCCESS:
+        if status is not None and status.upper() in pr.CHARGE_SUCCESS:
             if not charge_id:
                 # CONFIRMED без Id доверять нельзя: без id идемпотентность ниже
                 # не сработает, и каждый повтор такого коллбека продлевал бы
@@ -484,7 +518,7 @@ class PlategaPaymentMixin:
                 record.status = 'ACTIVE'
             record.last_charge_at = datetime.now(UTC)
             record.charges_success += 1
-            record.next_charge_at = _parse_next_charge(payload.get('NextChargeAt'))
+            record.next_charge_at = _parse_next_charge(fields.next_charge_at)
 
             tx = await create_transaction(
                 db,
@@ -607,6 +641,9 @@ class PlategaPaymentMixin:
         завершиться 200 OK независимо от того, доставилось ли сообщение в
         Telegram.
         """
+        if not settings.is_notifications_enabled():
+            return
+
         try:
             from app.cabinet.routes.websocket import cabinet_ws_manager
 
@@ -997,7 +1034,7 @@ class PlategaPaymentMixin:
 
         method_title = settings.get_platega_method_display_title(payment.payment_method_code)
 
-        if getattr(self, 'bot', None) and user.telegram_id:
+        if getattr(self, 'bot', None) and user.telegram_id and settings.is_notifications_enabled():
             try:
                 keyboard = await self.build_topup_success_keyboard(user)
                 await self.bot.send_message(
