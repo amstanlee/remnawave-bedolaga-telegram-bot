@@ -32,6 +32,7 @@ from app.database.models import (
     AdminRole,
     AdvertisingCampaign,
     AdvertisingCampaignRegistration,
+    AntilopayPayment,
     AppleIAPAbuseEvent,
     AppleIAPAccount,
     AppleNotification,
@@ -40,21 +41,26 @@ from app.database.models import (
     BroadcastHistory,
     ButtonClickLog,
     CabinetRefreshToken,
+    CisPayPayment,
     CloudPaymentsPayment,
     ContestAttempt,
     ContestRound,
     ContestTemplate,
     CryptoBotPayment,
     DiscountOffer,
+    DonutPayment,
     EmailTemplate,
+    EtoplatezhiPayment,
     FaqPage,
     FaqSetting,
     FreekassaPayment,
     GuestPurchase,
     HeleketPayment,
     InfoPage,
+    JupiterPayment,
     KassaAiPayment,
     LandingPage,
+    LavaPayment,
     MainMenuButton,
     MenuLayoutHistory,
     MonitoringLog,
@@ -64,6 +70,7 @@ from app.database.models import (
     NewsTag,
     OverpayPayment,
     Pal24Payment,
+    ParityPayPayment,
     PartnerApplication,
     PaymentMethodConfig,
     PayPearPayment,
@@ -103,6 +110,7 @@ from app.database.models import (
     SubscriptionTemporaryAccess,
     SupportAuditLog,
     SystemSetting,
+    TabPayPayment,
     Tariff,
     Ticket,
     TicketMessage,
@@ -129,6 +137,7 @@ from app.database.models import (
     server_squad_promo_groups,
     tariff_promo_groups,
 )
+from app.utils.timezone import format_local_datetime
 
 
 logger = structlog.get_logger(__name__)
@@ -254,6 +263,14 @@ class BackupService:
             RollyPayPayment,
             OverpayPayment,
             AuraPayPayment,
+            AntilopayPayment,
+            EtoplatezhiPayment,
+            JupiterPayment,
+            DonutPayment,
+            LavaPayment,
+            CisPayPayment,
+            TabPayPayment,
+            ParityPayPayment,
             AppleIAPAccount,
             AppleTransaction,
             AppleNotification,
@@ -1686,6 +1703,12 @@ class BackupService:
             'aurapay_payments',
             'etoplatezhi_payments',
             'antilopay_payments',
+            'tabpay_payments',
+            'paritypay_payments',
+            'cispay_payments',
+            'donut_payments',
+            'jupiter_payments',
+            'lava_payments',
             'apple_transactions',
             'saved_payment_methods',
             # --- Content/config ---
@@ -2117,7 +2140,7 @@ class BackupService:
             if file_path:
                 notification_text += f'\n📁 <code>{Path(file_path).name}</code>'
 
-            notification_text += f'\n\n⏰ <i>{datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")}</i>'
+            notification_text += f'\n\n⏰ <i>{format_local_datetime(datetime.now(UTC), "%d.%m.%Y %H:%M:%S")}</i>'
 
             try:
                 from app.services.admin_notification_service import AdminNotificationService, NotificationCategory
@@ -2153,7 +2176,7 @@ class BackupService:
             caption = '📦 <b>Резервная копия</b>\n\n'
             if temp_zip_path:
                 caption += '🔐 <b>Архив защищён паролем</b>\n\n'
-            caption += f'⏰ <i>{datetime.now(UTC).strftime("%d.%m.%Y %H:%M:%S")}</i>'
+            caption += f'⏰ <i>{format_local_datetime(datetime.now(UTC), "%d.%m.%Y %H:%M:%S")}</i>'
 
             send_kwargs = {
                 'chat_id': chat_id,
