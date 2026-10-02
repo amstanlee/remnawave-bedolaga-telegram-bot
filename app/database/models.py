@@ -186,6 +186,7 @@ class PaymentMethod(Enum):
     CASHERA = 'cashera'
     MANUAL = 'manual'
     BALANCE = 'balance'
+    YOOMONEY = 'yoomoney'  # ЮMoney: внешний FastAPI-сервис, бот видит только транзакции.
 
 
 class MainMenuButtonActionType(Enum):

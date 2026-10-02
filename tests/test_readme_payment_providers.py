@@ -26,7 +26,7 @@ README_PATH = Path(__file__).resolve().parents[1] / 'README.md'
 # `platega_recurrent` — это не отдельный провайдер, а ключ отображения СБП-
 # автопродлений Platega в админке платежей. В базу он не пишется, подключать
 # его как шлюз нечего, и отдельной строки в таблице README у него быть не должно.
-NOT_A_GATEWAY = frozenset({'balance', 'manual', 'platega_recurrent'})
+NOT_A_GATEWAY = frozenset({'balance', 'manual', 'platega_recurrent', 'yoomoney'})
 
 # Как провайдер называется в таблице, если это не сам код метода.
 DISPLAY_NAMES = {
