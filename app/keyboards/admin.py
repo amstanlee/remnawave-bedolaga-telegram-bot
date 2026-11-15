@@ -657,7 +657,7 @@ def get_referral_contest_manage_keyboard(
         ],
         [
             InlineKeyboardButton(
-                text='📈 Детальная статистика',
+                text=texts.t('ADMIN_CONTEST_DETAILED_STATS'),
                 callback_data=f'admin_contest_detailed_stats_{contest_id}',
             ),
         ],
@@ -669,17 +669,17 @@ def get_referral_contest_manage_keyboard(
         ],
         [
             InlineKeyboardButton(
-                text='👻 Виртуальные',
+                text=texts.t('ADMIN_CONTEST_VIRTUAL_USERS'),
                 callback_data=f'admin_contest_vp_{contest_id}',
             ),
         ],
         [
             InlineKeyboardButton(
-                text='🔄 Синхронизация',
+                text=texts.t('ADMIN_CONTEST_SYNC_BUTTON'),
                 callback_data=f'admin_contest_sync_{contest_id}',
             ),
             InlineKeyboardButton(
-                text='🔍 Отладка',
+                text=texts.t('ADMIN_CONTEST_DEBUG_BUTTON'),
                 callback_data=f'admin_contest_debug_{contest_id}',
             ),
         ],
@@ -1206,19 +1206,24 @@ def get_user_restrictions_keyboard(
 
     # Toggle для ограничения пополнения
     topup_emoji = '🚫' if restriction_topup else '✅'
-    topup_text = f'{topup_emoji} Пополнение'
+    topup_text = texts.t('ADMIN_USER_RESTRICTION_TOPUP_BUTTON').format(icon=topup_emoji)
     keyboard.append(
         [InlineKeyboardButton(text=topup_text, callback_data=f'admin_user_restriction_toggle_topup_{user_id}')]
     )
 
     # Toggle для ограничения подписки
     sub_emoji = '🚫' if restriction_subscription else '✅'
-    sub_text = f'{sub_emoji} Продление/покупка'
+    sub_text = texts.t('ADMIN_USER_RESTRICTION_SUB_BUTTON').format(icon=sub_emoji)
     keyboard.append([InlineKeyboardButton(text=sub_text, callback_data=f'admin_user_restriction_toggle_sub_{user_id}')])
 
     # Кнопка изменения причины
     keyboard.append(
-        [InlineKeyboardButton(text='📝 Изменить причину', callback_data=f'admin_user_restriction_reason_{user_id}')]
+        [
+            InlineKeyboardButton(
+                text=texts.t('ADMIN_USER_RESTRICTION_REASON_BUTTON'),
+                callback_data=f'admin_user_restriction_reason_{user_id}',
+            )
+        ]
     )
 
     # Кнопка снятия всех ограничений (если есть хотя бы одно)
@@ -1226,7 +1231,8 @@ def get_user_restrictions_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text='🔓 Снять все ограничения', callback_data=f'admin_user_restriction_clear_{user_id}'
+                    text=texts.t('ADMIN_USER_RESTRICTION_CLEAR_BUTTON'),
+                    callback_data=f'admin_user_restriction_clear_{user_id}',
                 )
             ]
         )
@@ -1506,106 +1512,6 @@ def get_broadcast_history_keyboard(page: int, total_pages: int, language: str = 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_sync_options_keyboard(language: str = 'ru') -> InlineKeyboardMarkup:
-    texts = get_texts(language)
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                text=_t(texts, 'ADMIN_SYNC_FULL', '🔄 Полная синхронизация'), callback_data='sync_all_users'
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t(texts, 'ADMIN_SYNC_TO_PANEL', '⬆️ Синхронизация в панель'), callback_data='sync_to_panel'
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t(texts, 'ADMIN_SYNC_ONLY_NEW', '🆕 Только новые'), callback_data='sync_new_users'
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t(texts, 'ADMIN_SYNC_UPDATE', '📈 Обновить данные'), callback_data='sync_update_data'
-            )
-        ],
-        [
-            InlineKeyboardButton(text=_t(texts, 'ADMIN_SYNC_VALIDATE', '🔍 Валидация'), callback_data='sync_validate'),
-            InlineKeyboardButton(text=_t(texts, 'ADMIN_SYNC_CLEANUP', '🧹 Очистка'), callback_data='sync_cleanup'),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t(texts, 'ADMIN_SYNC_RECOMMENDATIONS', '💡 Рекомендации'), callback_data='sync_recommendations'
-            )
-        ],
-        [InlineKeyboardButton(text=texts.BACK, callback_data='admin_remnawave')],
-    ]
-
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-def get_sync_confirmation_keyboard(sync_type: str, language: str = 'ru') -> InlineKeyboardMarkup:
-    texts = get_texts(language)
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                text=_t(texts, 'ADMIN_SYNC_CONFIRM', '✅ Подтвердить'), callback_data=f'confirm_{sync_type}'
-            )
-        ],
-        [InlineKeyboardButton(text=_t(texts, 'ADMIN_CANCEL', '❌ Отмена'), callback_data='admin_rw_sync')],
-    ]
-
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-def get_sync_result_keyboard(sync_type: str, has_errors: bool = False, language: str = 'ru') -> InlineKeyboardMarkup:
-    texts = get_texts(language)
-    keyboard = []
-
-    if has_errors:
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_SYNC_RETRY', '🔄 Повторить'), callback_data=f'sync_{sync_type}'
-                )
-            ]
-        )
-
-    if sync_type != 'all_users':
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_SYNC_FULL', '🔄 Полная синхронизация'), callback_data='sync_all_users'
-                )
-            ]
-        )
-
-    keyboard.extend(
-        [
-            [
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_STATS_BUTTON', '📊 Статистика'), callback_data='admin_rw_system'
-                ),
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_SYNC_VALIDATE', '🔍 Валидация'), callback_data='sync_validate'
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_SYNC_BACK', '⬅️ К синхронизации'), callback_data='admin_rw_sync'
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_BACK_TO_MAIN', '🏠 В главное меню'), callback_data='admin_remnawave'
-                )
-            ],
-        ]
-    )
-
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
 def get_period_selection_keyboard(language: str = 'ru') -> InlineKeyboardMarkup:
     texts = get_texts(language)
 
@@ -1745,7 +1651,9 @@ def get_monitoring_keyboard(language: str = 'ru') -> InlineKeyboardMarkup:
                     text=_t(texts, 'ADMIN_MONITORING_TEST_NOTIFICATIONS', '🧪 Тест уведомлений'),
                     callback_data='admin_mon_test_notifications',
                 ),
-                InlineKeyboardButton(text='⚙️ Настройки трафика', callback_data='admin_mon_traffic_settings'),
+                InlineKeyboardButton(
+                    text=texts.t('ADMIN_MONITORING_TRAFFIC_SETTINGS_BUTTON'), callback_data='admin_mon_traffic_settings'
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -2174,20 +2082,6 @@ def get_maintenance_keyboard(
             InlineKeyboardButton(text=texts.BACK, callback_data='admin_submenu_settings'),
         ]
     )
-
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-def get_sync_simplified_keyboard(language: str = 'ru') -> InlineKeyboardMarkup:
-    texts = get_texts(language)
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                text=_t(texts, 'ADMIN_SYNC_FULL', '🔄 Полная синхронизация'), callback_data='sync_all_users'
-            )
-        ],
-        [InlineKeyboardButton(text=texts.BACK, callback_data='admin_remnawave')],
-    ]
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 

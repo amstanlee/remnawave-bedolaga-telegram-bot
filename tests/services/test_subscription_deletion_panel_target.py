@@ -180,7 +180,7 @@ class _PanelSpy:
         from app.services.remnawave_webhook_service import RemnaWaveWebhookService
         from app.services.subscription_service import SubscriptionService
 
-        async def fake_delete(_self, panel_user_id):
+        async def fake_delete(_self, panel_user_id, db=None):
             self.deleted.append(panel_user_id)
             self.order.append('panel_delete')
             return True
@@ -371,3 +371,13 @@ async def test_multi_tariff_deletion_honours_disable_mode(monkeypatch):
     # ничего не удаляется — и помечать намеренное удаление нечего
     assert spy.marked == []
     assert remaining is None
+
+
+@pytest.fixture(autouse=True)
+def no_hotpay_consent_in_legacy_scenarios(monkeypatch):
+    """HOT Pay obligations are independent of these legacy scenarios; covered on PostgreSQL."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr('app.services.payhot_recurrent_guard.has_live_payhot', AsyncMock(return_value=False))
+    monkeypatch.setattr('app.services.payhot_recurrent_guard.has_conflicting_payhot', AsyncMock(return_value=False))
+    monkeypatch.setattr('app.services.payhot_recurrent_guard.stage_payhot_cancellation', AsyncMock())

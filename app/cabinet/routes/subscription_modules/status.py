@@ -57,7 +57,7 @@ async def get_subscription(
 
     subscription = await resolve_subscription(db, fresh_user, subscription_id)
 
-    if not subscription:
+    if not subscription or subscription.is_pending_trial:
         # Return 200 with has_subscription: false instead of 404
         return SubscriptionStatusResponse(has_subscription=False, subscription=None)
 
@@ -82,8 +82,10 @@ async def get_subscription(
     # Fetch traffic purchases (monthly packages)
     traffic_purchases_data = []
     from app.database.models import TrafficPurchase
+    from app.services.traffic_accounting_service import traffic_accounting_summary
 
     now = datetime.now(UTC)
+    accounting = await traffic_accounting_summary(db, subscription.id, now=now)
     purchases_query = (
         select(TrafficPurchase)
         .where(TrafficPurchase.subscription_id == subscription.id)
@@ -105,6 +107,7 @@ async def get_subscription(
             {
                 'id': purchase.id,
                 'traffic_gb': purchase.traffic_gb,
+                'remaining_gb': accounting['purchase_remaining'].get(purchase.id),
                 'expires_at': purchase.expires_at,
                 'created_at': purchase.created_at,
                 'days_remaining': days_remaining,
@@ -113,7 +116,7 @@ async def get_subscription(
         )
 
     subscription_data = _subscription_to_response(
-        subscription, servers, tariff_name, traffic_purchases_data, user=fresh_user
+        subscription, servers, tariff_name, traffic_purchases_data, user=fresh_user, traffic_accounting=accounting
     )
     return SubscriptionStatusResponse(has_subscription=True, subscription=subscription_data)
 
@@ -158,7 +161,11 @@ async def get_connection_link(
     connect_mode = settings.CONNECT_BUTTON_MODE
     hide_subscription_link = settings.should_hide_subscription_link()
 
+    from app.utils.subscription_mirrors import get_subscription_mirrors
+
     return {
+        'subscription_id': subscription.id,
+        'mirrors': get_subscription_mirrors(subscription_url),
         'subscription_url': subscription_url if not hide_subscription_link else None,
         'display_link': display_link if not hide_subscription_link else None,
         'happ_redirect_link': happ_redirect,

@@ -526,6 +526,11 @@ async def create_user(
 async def update_user(db: AsyncSession, user: User, **kwargs) -> User:
     from app.utils.validators import sanitize_telegram_name
 
+    if kwargs.get('status') in (UserStatus.BLOCKED.value, UserStatus.DELETED.value):
+        from app.services.payhot_recurrent_guard import stage_payhot_owner_cancellation
+
+        await db.scalar(select(User.id).where(User.id == user.id).with_for_update())
+        await stage_payhot_owner_cancellation(db, user.id, reason='account_unavailable')
     for field, value in kwargs.items():
         if field in ('first_name', 'last_name'):
             value = sanitize_telegram_name(value)
@@ -672,12 +677,14 @@ async def add_user_balance_by_id(
 
 
 async def lock_user_for_pricing(db: AsyncSession, user_id: int) -> User:
-    """Lock user row with FOR UPDATE and return refreshed instance.
+    """Lock user row with FOR NO KEY UPDATE and return refreshed instance.
 
     Call BEFORE computing prices that depend on promo offer state
     to prevent TOCTOU race conditions where two concurrent requests
     both read the same promo offer discount and charge a discounted price.
     """
+    # Balance/discount changes never alter the User primary key. Allow ledger
+    # FK KEY SHARE while a recurring payment owns the subscription row.
     result = await db.execute(
         select(User)
         .where(User.id == user_id)
@@ -686,7 +693,7 @@ async def lock_user_for_pricing(db: AsyncSession, user_id: int) -> User:
             selectinload(User.promo_group),
             selectinload(User.subscriptions).selectinload(Subscription.tariff),
         )
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
     return result.scalar_one()
@@ -1148,6 +1155,7 @@ def _users_list_conditions(
                             SubscriptionStatus.LIMITED.value,
                         )
                     ),
+                    Subscription.end_date > now,
                     Subscription.traffic_limit_gb > 0,
                     Subscription.traffic_used_gb >= Subscription.traffic_limit_gb * threshold,
                 )
@@ -1559,6 +1567,10 @@ async def get_inactive_users(db: AsyncSession, months: int = 3) -> list[User]:
 
 
 async def delete_user(db: AsyncSession, user: User) -> bool:
+    from app.services.payhot_recurrent_guard import stage_payhot_owner_cancellation
+
+    await db.scalar(select(User.id).where(User.id == user.id).with_for_update())
+    await stage_payhot_owner_cancellation(db, user.id, reason='account_deleted')
     user.status = UserStatus.DELETED.value
     user.updated_at = datetime.now(UTC)
 

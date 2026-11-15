@@ -20,6 +20,7 @@ from app.localization.loader import ensure_locale_templates
 from app.logging_config import _resolve_log_level, setup_logging
 from app.services.backup_service import backup_service
 from app.services.ban_notification_service import ban_notification_service
+from app.services.bot_commands import CommandMenuStore, CommandMenuSync
 from app.services.broadcast_service import broadcast_service
 from app.services.contest_rotation_service import contest_rotation_service
 from app.services.daily_subscription_service import daily_subscription_service
@@ -43,12 +44,18 @@ from app.services.remnawave_sync_service import remnawave_sync_service
 from app.services.reporting_service import reporting_service
 from app.services.riopay_service import riopay_service
 from app.services.system_settings_service import bot_configuration_service
+from app.services.traffic_accounting_worker import traffic_accounting_worker
 from app.services.traffic_monitoring_service import traffic_monitoring_scheduler
 from app.services.version_service import version_service
 from app.services.web_api_token_service import ensure_default_web_api_token
 from app.utils.log_handlers import ExcludePaymentFilter, LevelFilterHandler
 from app.utils.payment_logger import configure_payment_logger
 from app.utils.startup_timeline import StartupTimeline
+from app.utils.telegram_polling import (
+    start_polling_with_retry,
+    telegram_startup_request_or_stop,
+    wait_for_telegram_or_stop,
+)
 from app.webapi.server import WebAPIServer
 from app.webserver.unified_app import create_unified_app
 
@@ -199,6 +206,7 @@ async def main():
     traffic_monitoring_task = None
     daily_subscription_task = None
     polling_task = None
+    command_menu_task = None
     web_api_server = None
     telegram_webhook_enabled = False
     polling_enabled = True
@@ -342,13 +350,28 @@ async def main():
             except Exception as error:
                 logger.error('❌ Не удалось перенести настройки из файлов в базу', error=error)
 
+        bot_run_mode = settings.get_bot_run_mode()
+        polling_enabled = bot_run_mode == 'polling'
+        telegram_webhook_enabled = bot_run_mode == 'webhook'
+        if telegram_webhook_enabled and not settings.get_telegram_webhook_url():
+            raise ValueError('WEBHOOK_URL is required when BOT_RUN_MODE=webhook')
+
         bot = None
         dp = None
         async with timeline.stage('Настройка бота', '🤖', success_message='Бот настроен') as stage:
             bot, dp = await setup_bot()
             stage.log('Кеш и FSM подготовлены')
 
-        bot_user = await bot.get_me()
+        # Сетевой сбой здесь не должен завершать процесс: Docker перезапустит
+        # контейнер, и сбой превратится в цикл рестартов.
+        if not await wait_for_telegram_or_stop(bot, lambda: killer.exit):
+            logger.info('Остановка запрошена, пока Telegram был недоступен')
+            return
+
+        bot_user = await bot.me()
+        command_menu_task = asyncio.create_task(
+            CommandMenuSync(bot, CommandMenuStore(bot.id)).run(), name='telegram-command-menus'
+        )
         if bot_user.username and not settings.BOT_USERNAME:
             settings.BOT_USERNAME = bot_user.username
             logger.info('BOT_USERNAME auto-detected', bot_username=bot_user.username)
@@ -521,6 +544,11 @@ async def main():
                 stage.warning(f'Grace-доступ безопасно отключён из-за ошибки конфигурации: {e}')
                 logger.error('Ошибка запуска grace-доступа; основной бот продолжает работу', error=e)
 
+        try:
+            await traffic_accounting_worker.start()
+        except Exception as error:
+            logger.warning('Traffic accounting worker startup failed', error_type=type(error).__name__)
+
         # Разовая фоновая чистка накопившихся дублей тарифных подписок (multi-tariff):
         # лишние истёкшие дубли удаляются из БД и панели вместе, как штатное удаление.
         # Идемпотентно — после первой чистки no-op; панель легла — повторит на след. старте.
@@ -605,10 +633,6 @@ async def main():
             else:
                 stage.skip('NaloGO отключен настройками')
 
-        bot_run_mode = settings.get_bot_run_mode()
-        polling_enabled = bot_run_mode == 'polling'
-        telegram_webhook_enabled = bot_run_mode == 'webhook'
-
         payment_webhooks_enabled = any(
             [
                 settings.TRIBUTE_ENABLED,
@@ -687,13 +711,18 @@ async def main():
                     stage.warning('WEBHOOK_URL не задан, пропускаем настройку webhook')
                 else:
                     allowed_updates = dp.resolve_used_update_types()
-                    await bot.set_webhook(
-                        url=webhook_url,
-                        secret_token=settings.WEBHOOK_SECRET_TOKEN,
-                        drop_pending_updates=False,  # Обрабатываем накопившиеся обновления
-                        allowed_updates=allowed_updates,
-                        **({'ip_address': settings.WEBHOOK_IP} if settings.WEBHOOK_IP else {}),
-                    )
+                    if not await telegram_startup_request_or_stop(
+                        lambda: bot.set_webhook(
+                            url=webhook_url,
+                            secret_token=settings.WEBHOOK_SECRET_TOKEN,
+                            drop_pending_updates=False,  # Обрабатываем накопившиеся обновления
+                            allowed_updates=allowed_updates,
+                            **({'ip_address': settings.WEBHOOK_IP} if settings.WEBHOOK_IP else {}),
+                        ),
+                        lambda: killer.exit,
+                        operation='setWebhook',
+                    ):
+                        return
                     stage.log(f'Webhook установлен: {webhook_url}')
                     stage.log(f'Allowed updates: {", ".join(sorted(allowed_updates)) if allowed_updates else "all"}')
                     stage.success('Telegram webhook активен')
@@ -799,7 +828,15 @@ async def main():
             success_message='Aiogram polling запущен',
         ) as stage:
             if polling_enabled:
-                polling_task = asyncio.create_task(dp.start_polling(bot, skip_updates=False))
+                # A webhook survives process restarts and prevents getUpdates.
+                # Keep queued updates when changing the transport to polling.
+                if not await telegram_startup_request_or_stop(
+                    lambda: bot.delete_webhook(drop_pending_updates=False),
+                    lambda: killer.exit,
+                    operation='deleteWebhook',
+                ):
+                    return
+                polling_task = asyncio.create_task(start_polling_with_retry(dp, bot, skip_updates=False))
                 stage.log('skip_updates=False — накопившиеся обновления будут обработаны')
             else:
                 polling_task = None
@@ -1051,6 +1088,15 @@ async def main():
             await referral_contest_service.stop()
         except Exception as e:
             logger.error('Ошибка остановки сервиса конкурсов', error=e)
+
+        try:
+            await traffic_accounting_worker.stop()
+        except Exception as error:
+            logger.warning('Traffic accounting worker shutdown failed', error_type=type(error).__name__)
+
+        if command_menu_task is not None:
+            command_menu_task.cancel()
+            await asyncio.gather(command_menu_task, return_exceptions=True)
 
         logger.info('ℹ️ Остановка сервиса grace-доступа...')
         try:

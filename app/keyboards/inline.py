@@ -17,6 +17,7 @@ from app.utils.pricing_utils import (
     apply_percentage_discount,
     format_period_description,
 )
+from app.utils.subscription_mirrors import get_subscription_mirrors
 from app.utils.subscription_utils import (
     get_display_subscription_link,
     get_happ_cryptolink_redirect_link,
@@ -24,6 +25,58 @@ from app.utils.subscription_utils import (
 
 
 logger = structlog.get_logger(__name__)
+
+
+def add_subscription_mirror_selector(
+    markup: InlineKeyboardMarkup, subscription, language: str = DEFAULT_LANGUAGE
+) -> InlineKeyboardMarkup:
+    """Add a context-bound selector; never expose mirrors in hidden/crypto modes."""
+    sub_id = getattr(subscription, 'id', None)
+    if not sub_id or not get_subscription_mirrors(getattr(subscription, 'subscription_url', None)):
+        return markup
+    if any((button.callback_data or '').startswith('sub_mirrors:') for row in markup.inline_keyboard for button in row):
+        return markup
+    # Post-purchase and promo keyboards can contain legacy unscoped callbacks.
+    # Bind those to the same subscription as the selector without mutating callers.
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                button.model_copy(update={'callback_data': f'{button.callback_data}:{sub_id}'})
+                if button.callback_data in {'subscription_connect', 'open_subscription_link'}
+                else button
+                for button in buttons
+            ]
+            for buttons in markup.inline_keyboard
+        ]
+    )
+    texts = get_texts(language)
+    row = [
+        InlineKeyboardButton(
+            text=texts.t('SUBSCRIPTION_MIRROR_SELECTOR', 'Ссылка: {label} ▾').format(
+                label=texts.t('SUBSCRIPTION_MIRROR_MAIN', 'Основная')
+            ),
+            callback_data=f'sub_mirrors:{sub_id}:0:main',
+        )
+    ]
+    position = len(markup.inline_keyboard)
+    canonical = getattr(subscription, 'subscription_url', None)
+    for index, buttons in enumerate(markup.inline_keyboard):
+        if any(
+            button.url == canonical
+            or (button.web_app and button.web_app.url == canonical)
+            or (button.callback_data or '').split(':')[0] in {'subscription_connect', 'open_subscription_link', 'sl'}
+            for button in buttons
+        ):
+            position = index + 1
+            break
+        if any(
+            (button.callback_data or '').split(':')[0] in {'back_to_menu', 'menu_subscription', 'sm'}
+            for button in buttons
+        ):
+            position = min(position, index)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[*markup.inline_keyboard[:position], row, *markup.inline_keyboard[position:]]
+    )
 
 
 async def get_main_menu_keyboard_async(
@@ -138,7 +191,9 @@ async def get_main_menu_keyboard_async(
             has_autopay=has_autopay,
         )
 
-        return await MenuLayoutService.build_keyboard(db, context)
+        return add_subscription_mirror_selector(
+            await MenuLayoutService.build_keyboard(db, context), subscription, language
+        )
 
     # Fallback на синхронную версию
     return get_main_menu_keyboard(
@@ -552,7 +607,9 @@ def _build_cabinet_main_menu_keyboard(
                         )
                     ]
                     if section_cfg.get('enabled', True):
-                        admin_web_text = section_cfg.get('labels', {}).get(language, '') or '🖥 Веб-Админка'
+                        admin_web_text = section_cfg.get('labels', {}).get(language, '') or texts.t(
+                            'MENU_WEB_ADMIN', '🖥 Веб-Админка'
+                        )
                         admin_row.append(_cabinet_button(admin_web_text, '/admin', 'admin_panel'))
                     keyboard_rows.append(admin_row)
                     continue  # bypass max_per_row chunking
@@ -564,7 +621,9 @@ def _build_cabinet_main_menu_keyboard(
 
     # -- Moderator panel (only when not admin — admin row handled above) --
     if is_moderator and not is_admin:
-        keyboard_rows.append([InlineKeyboardButton(text='🧑‍⚖️ Модерация', callback_data='moderator_panel')])
+        keyboard_rows.append(
+            [InlineKeyboardButton(text=get_texts(language).t('MODERATION_BUTTON'), callback_data='moderator_panel')]
+        )
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
@@ -805,9 +864,11 @@ def get_main_menu_keyboard(
         logger.debug('DEBUG KEYBOARD: Админ кнопка НЕ добавлена')
     # Moderator access (limited support panel)
     if (not is_admin) and is_moderator:
-        keyboard.append([InlineKeyboardButton(text='🧑‍⚖️ Модерация', callback_data='moderator_panel')])
+        keyboard.append(
+            [InlineKeyboardButton(text=get_texts(language).t('MODERATION_BUTTON'), callback_data='moderator_panel')]
+        )
 
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return add_subscription_mirror_selector(InlineKeyboardMarkup(inline_keyboard=keyboard), subscription, language)
 
 
 def get_info_menu_keyboard(
@@ -1111,6 +1172,7 @@ def get_subscription_keyboard(
     is_trial: bool = False,
     subscription=None,
     gift_enabled: bool = False,
+    cispay_recurring: bool = False,
 ) -> InlineKeyboardMarkup:
     from app.config import settings
 
@@ -1123,6 +1185,15 @@ def get_subscription_keyboard(
         if settings.is_multi_tariff_enabled() and subscription and hasattr(subscription, 'id')
         else ''
     )
+
+    if has_subscription and cispay_recurring and subscription is not None:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.t('CISREC_TITLE', 'Автоплатёж CisPay'), callback_data=f'cisrec:menu:{subscription.id}'
+                )
+            ]
+        )
 
     if has_subscription:
         subscription_link = get_display_subscription_link(subscription) if subscription else None
@@ -1324,7 +1395,7 @@ def get_subscription_keyboard(
 
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
 
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return add_subscription_mirror_selector(InlineKeyboardMarkup(inline_keyboard=keyboard), subscription, language)
 
 
 def get_payment_methods_keyboard_with_cart(
@@ -1336,7 +1407,11 @@ def get_payment_methods_keyboard_with_cart(
 
     # Добавляем кнопку "Очистить корзину"
     keyboard.inline_keyboard.append(
-        [InlineKeyboardButton(text='🗑️ Очистить корзину и вернуться', callback_data='clear_saved_cart')]
+        [
+            InlineKeyboardButton(
+                text=get_texts(language).t('CART_CLEAR_AND_RETURN_BUTTON'), callback_data='clear_saved_cart'
+            )
+        ]
     )
 
     # Добавляем кнопку возврата к оформлению подписки
@@ -1354,8 +1429,12 @@ def get_subscription_confirm_keyboard_with_cart(language: str = 'ru') -> InlineK
     texts = get_texts(language)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text='✅ Подтвердить покупку', callback_data='subscription_confirm')],
-            [InlineKeyboardButton(text='🗑️ Очистить корзину', callback_data='clear_saved_cart')],
+            [
+                InlineKeyboardButton(
+                    text=get_texts(language).t('TARIFF_PURCHASE_CONFIRM_BUTTON'), callback_data='subscription_confirm'
+                )
+            ],
+            [InlineKeyboardButton(text=get_texts(language).t('CART_CLEAR_BUTTON'), callback_data='clear_saved_cart')],
             [
                 InlineKeyboardButton(
                     text=texts.BACK,
@@ -1386,7 +1465,7 @@ def get_insufficient_balance_keyboard_with_cart(
         0,
         [
             InlineKeyboardButton(
-                text='🗑️ Очистить корзину и вернуться',
+                text=get_texts(language).t('CART_CLEAR_AND_RETURN_BUTTON'),
                 callback_data='clear_saved_cart',
             )
         ],
@@ -1638,30 +1717,50 @@ def get_balance_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMark
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def _apply_payment_name_overrides(keyboard: list[list[InlineKeyboardButton]]) -> None:
-    """Replace payment-method button labels with cabinet-set display names.
+def _payment_callback_method(data: str) -> str:
+    if data.startswith('topup_amount|'):
+        parts = data.split('|')
+        return parts[1] if len(parts) > 1 else ''
+    return data[len('topup_') :] if data.startswith('topup_') else ''
 
-    Bot keyboards build labels from locale strings / ``*_DISPLAY_NAME`` settings,
-    which ignore the per-method overrides operators set in the cabinet
-    (``PaymentMethodConfig.display_name``). Here we decode the method_id from each
-    ``topup_*`` callback and, when an override exists, show it — so bot button
-    labels stay in sync with the cabinet. No override -> the original label is kept.
-    """
+
+def _apply_payment_name_overrides(
+    keyboard: list[list[InlineKeyboardButton]],
+    language: str = DEFAULT_LANGUAGE,
+) -> None:
+    """Apply configured names without erasing the distinction between YooKassa rails."""
     from app.services.payment_method_config_service import get_display_name_override
 
+    texts = get_texts(language)
     for row in keyboard:
         for idx, button in enumerate(row):
-            data = button.callback_data or ''
-            if data.startswith('topup_amount|'):
-                parts = data.split('|')
-                method = parts[1] if len(parts) > 1 else ''
-            elif data.startswith('topup_'):
-                method = data[len('topup_') :]
-            else:
-                continue
+            method = _payment_callback_method(button.callback_data or '')
             override = get_display_name_override(method) if method else None
             if override:
+                if method == 'yookassa_sbp':
+                    override = texts.t('PAYMENT_SBP_PROVIDER').format(provider=override)
+                elif method == 'yookassa':
+                    override = texts.t('PAYMENT_CARD_PROVIDER').format(provider=override)
                 row[idx] = button.model_copy(update={'text': override})
+
+
+def _apply_payment_method_order(keyboard: list[list[InlineKeyboardButton]]) -> None:
+    """Use saved provider order, preserving sub-option order and non-payment controls."""
+    from app.services.payment_method_config_service import get_display_sort_order
+
+    rows = [
+        (index, row)
+        for index, row in enumerate(keyboard)
+        if len(row) == 1 and _payment_callback_method(row[0].callback_data or '') not in ('', 'support')
+    ]
+
+    def key(row):
+        order = get_display_sort_order(_payment_callback_method(row[0].callback_data or ''))
+        return order is None, order if order is not None else 0
+
+    ordered = sorted((row for _, row in rows), key=key)
+    for (index, _), row in zip(rows, ordered, strict=True):
+        keyboard[index] = row
 
 
 def get_payment_methods_keyboard(
@@ -1929,20 +2028,10 @@ def get_payment_methods_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text=texts.t('PAYMENT_SEVERPAY', f'💳 Банковская карта ({severpay_name})'),
+                    text=texts.t(
+                        'PAYMENT_SEVERPAY', texts.t('PAYMENT_BANK_CARD_PROVIDER').format(provider=severpay_name)
+                    ),
                     callback_data=_build_callback('severpay'),
-                )
-            ]
-        )
-        has_direct_payment_methods = True
-
-    if settings.is_paypear_enabled():
-        paypear_name = settings.get_paypear_display_name()
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text=texts.t('PAYMENT_PAYPEAR', f'💳 Оплата ({paypear_name})'),
-                    callback_data=_build_callback('paypear'),
                 )
             ]
         )
@@ -2188,7 +2277,10 @@ def get_payment_methods_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text=texts.t('PAYMENT_LAVA_CARD', f'💳 {lava_card_name} - через {lava_name}'),
+                    text=texts.t(
+                        'PAYMENT_LAVA_CARD',
+                        texts.t('PAYMENT_CARD_VIA_PROVIDER').format(method=lava_card_name, provider=lava_name),
+                    ),
                     callback_data=_build_callback('lava_card'),
                 )
             ]
@@ -2201,7 +2293,10 @@ def get_payment_methods_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text=texts.t('PAYMENT_LAVA_SBP', f'📱 {lava_sbp_name} - через {lava_name}'),
+                    text=texts.t(
+                        'PAYMENT_LAVA_SBP',
+                        texts.t('PAYMENT_SBP_VIA_PROVIDER').format(method=lava_sbp_name, provider=lava_name),
+                    ),
                     callback_data=_build_callback('lava_sbp'),
                 )
             ]
@@ -2215,6 +2310,17 @@ def get_payment_methods_keyboard(
                 InlineKeyboardButton(
                     text=texts.t('PAYMENT_LAVA', f'🌋 {lava_name}'),
                     callback_data=_build_callback('lava'),
+                )
+            ]
+        )
+        has_direct_payment_methods = True
+
+    if settings.is_cispay_crypto_enabled():
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f'🪙 {settings.get_cispay_crypto_display_name()}',
+                    callback_data=_build_callback('cispay_crypto'),
                 )
             ]
         )
@@ -2275,6 +2381,39 @@ def get_payment_methods_keyboard(
                     InlineKeyboardButton(
                         text=texts.t('PAYMENT_CASHERA', f'💳 {cashera_name}'),
                         callback_data=_build_callback('cashera'),
+                    )
+                ]
+            )
+        has_direct_payment_methods = True
+
+    if settings.is_anore_enabled():
+        for method in settings.get_anore_methods():
+            label = {'sbp': 'СБП', 'card': 'Карта', 'yoomoney': 'ЮMoney', 'crypto': 'Криптовалюта'}[method]
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text=f'💳 {settings.get_anore_display_name()} — {label}',
+                        callback_data=_build_callback(f'anore_{method}'),
+                    )
+                ]
+            )
+        has_direct_payment_methods = True
+
+    if settings.is_payhot_enabled():
+        for method in settings.get_payhot_methods():
+            label = {
+                'sbp': 'СБП',
+                'card': 'Карта',
+                'sberpay': 'SberPay',
+                'applepay': 'Apple Pay',
+                'googlepay': 'Google Pay',
+                'crypto': 'Криптовалюта',
+            }[method]
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text=f'💳 {settings.get_payhot_display_name()} — {label}',
+                        callback_data=_build_callback(f'payhot_{method}'),
                     )
                 ]
             )
@@ -2387,7 +2526,8 @@ def get_payment_methods_keyboard(
 
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_balance')])
 
-    _apply_payment_name_overrides(keyboard)
+    _apply_payment_name_overrides(keyboard, language)
+    _apply_payment_method_order(keyboard)
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -2981,7 +3121,8 @@ def get_reset_traffic_confirm_keyboard(
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=f'✅ Сбросить за {settings.format_price(price_kopeks)}', callback_data='confirm_reset_traffic'
+                    text=texts.t('RESET_TRAFFIC_PRICE_BUTTON', '').format(price=settings.format_price(price_kopeks)),
+                    callback_data='confirm_reset_traffic',
                 )
             ]
         )
@@ -3939,9 +4080,15 @@ def get_ticket_notification_keyboard(
     url_row: list[InlineKeyboardButton] = []
     if username:
         safe_username = username.lstrip('@')
-        url_row.append(InlineKeyboardButton(text='✉ ЛС', url=f'tg://resolve?domain={safe_username}'))
+        url_row.append(
+            InlineKeyboardButton(
+                text=get_texts(language).t('TICKET_DIRECT_MESSAGE_BUTTON'), url=f'tg://resolve?domain={safe_username}'
+            )
+        )
     if (tg_id := _coerce_tg_user_id(telegram_id)) is not None:
-        url_row.append(InlineKeyboardButton(text='👤 Профиль', url=f'tg://user?id={tg_id}'))
+        url_row.append(
+            InlineKeyboardButton(text=get_texts(language).t('TICKET_PROFILE_BUTTON'), url=f'tg://user?id={tg_id}')
+        )
     if url_row:
         keyboard.append(url_row)
 
@@ -3950,7 +4097,7 @@ def get_ticket_notification_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text='👤 К пользователю',
+                    text=get_texts(language).t('TICKET_MANAGE_USER_BUTTON'),
                     callback_data=f'admin_user_manage_{user_id}_from_ticket_{ticket_id}',
                 )
             ]

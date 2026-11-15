@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 class BalanceResponse(BaseModel):
@@ -65,10 +65,20 @@ class PaymentMethodResponse(BaseModel):
 
 
 class TopUpRequest(BaseModel):
+    @model_validator(mode='after')
+    def require_payhot_phone(self):
+        if (self.payment_method == 'payhot' and self.payment_option == 'sberpay') and not self.payment_phone:
+            raise ValueError('SberPay requires your bank-linked phone in +7XXXXXXXXXX format')
+        return self
+
+    payment_phone: str | None = Field(default=None, pattern=r'^\+7[0-9]{10}$', max_length=12)
+
     """Request to create payment for balance top-up."""
 
-    amount_kopeks: int = Field(..., ge=1000, le=2_000_000_000, description='Amount in kopeks (min 10 rubles)')
+    # The selected provider supplies its effective minimum (including DB overrides).
+    amount_kopeks: int = Field(..., ge=1, le=2_000_000_000, description='Amount in kopeks')
     payment_method: str = Field(..., description='Payment method ID')
+    customer_email: EmailStr | None = None
     payment_option: str | None = Field(None, description='Payment option (e.g. Platega method code)')
 
 
@@ -101,6 +111,8 @@ class StarsInvoiceResponse(BaseModel):
 
 
 class PendingPaymentResponse(BaseModel):
+    is_test: bool = False
+
     """Pending payment details for manual verification."""
 
     id: int

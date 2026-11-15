@@ -209,9 +209,26 @@ class SQLAlchemyGraceSessionStore:
         return _model_to_session(model)
 
     async def create(self, session: GraceAccessSession) -> GraceAccessSession:
+        if session.overlay.reset_used_traffic:
+            mode = await self._db.scalar(
+                select(Subscription.traffic_accounting_mode).where(Subscription.id == session.subscription_id)
+            )
+            if mode == 'managed':
+                session = replace(
+                    session,
+                    overlay=replace(
+                        session.overlay,
+                        reset_used_traffic=False,
+                        traffic_limit_bytes=session.overlay.traffic_limit_bytes
+                        + session.panel_before.used_traffic_bytes,
+                    ),
+                )
         model = _session_to_model(session)
         try:
             async with self._db.begin_nested():
+                from app.services.traffic_accounting_service import prepare_grace_accounting
+
+                await prepare_grace_accounting(self._db, session.subscription_id)
                 self._db.add(model)
                 await self._db.flush()
                 await _mark_subscription_grace_open(self._db, session.subscription_id, open_=True)
@@ -285,7 +302,14 @@ class SQLAlchemyGraceSessionStore:
             open_=session.state is not GraceSessionState.COMPLETED,
         )
         saved = replace(session, version=session.version + 1)
+        if session.state is GraceSessionState.COMPLETED:
+            from app.services.traffic_accounting_service import finish_grace_accounting
+
+            await finish_grace_accounting(self._db, session.subscription_id)
         if session.state is GraceSessionState.RESTORING:
+            from app.services.traffic_accounting_service import prepare_grace_accounting
+
+            await prepare_grace_accounting(self._db, session.subscription_id)
             # RESTORING is a durable checkpoint before the external restore
             # PATCH. It makes a crash after PATCH safely idempotent.
             await self._db.commit()
@@ -400,6 +424,31 @@ class RemnawaveGracePanelGateway:
             return None
         return _panel_user_to_snapshot(panel_user)
 
+    async def _overlay_after_confirmed_deletion(self, api, current, overlay, *, now):
+        from app.services.grace_squad_recovery import overlay_after_confirmed_deletion
+
+        replacement = None
+        if self._db is not None and self._subscription_id is not None:
+            session = await SQLAlchemyGraceSessionStore(self._db, subscription_id=self._subscription_id).get_open(
+                self._subscription_id
+            )
+            if session is not None and session.overlay == overlay:
+                replacement = _build_policy().squad_for(session.reason)
+        return await overlay_after_confirmed_deletion(api, current, overlay, now=now, replacement=replacement)
+
+    async def repair_deleted_squad(self, session, replacement):
+        if (
+            session.state is GraceSessionState.PENDING
+            and session.overlay.squad_uuids == (replacement,)
+            and not session.last_error
+        ):
+            return session.overlay
+        from app.services.grace_squad_recovery import repair_deleted_grace_squad
+        from app.services.remnawave_service import remnawave_service
+
+        async with remnawave_service.get_api_client() as api:
+            return await repair_deleted_grace_squad(api, session, replacement)
+
     async def apply_overlay(self, remnawave_id: int, overlay: GracePanelOverlay) -> None:
         from app.services.remnawave_service import remnawave_service
 
@@ -458,6 +507,20 @@ class RemnawaveGracePanelGateway:
                 return GraceRestoreOutcome.ALREADY_RESTORED
 
             current = _panel_user_to_snapshot(current_user)
+            expected_overlay = await self._overlay_after_confirmed_deletion(api, current, expected_overlay, now=now)
+            if self._db is not None and self._subscription_id is not None:
+                from app.services.traffic_accounting_service import restore_managed_grace
+
+                mode = await self._db.scalar(
+                    select(Subscription.traffic_accounting_mode).where(Subscription.id == self._subscription_id)
+                )
+                if mode == 'managed':
+                    if not panel_matches_overlay(
+                        current, expected_overlay, now=now
+                    ) and not panel_is_safe_pending_source(current, snapshot, expected_overlay):
+                        return GraceRestoreOutcome.CONFLICT
+                    await restore_managed_grace(self._db, self._subscription_id, api, now=now)
+                    return GraceRestoreOutcome.RESTORED
             # Цель строится по тому, что стоит в панели сейчас: истёкшему снимку
             # прошедшую дату не вернуть, и общее правило гашения смотрит на неё.
             target = _build_restore_target(snapshot, now=now, panel_current=current.expire_at)
@@ -576,6 +639,12 @@ class RemnawaveGracePanelGateway:
         target = _build_billing_target(billing, now=now)
 
         async with remnawave_service.get_api_client() as api:
+            if self._db is not None and self._subscription_id is not None:
+                from app.services.traffic_accounting_service import restore_managed_grace
+
+                restored = await restore_managed_grace(self._db, self._subscription_id, api, now=now)
+                if restored is not None:
+                    return
             if target.status is PanelUserStatus.EXPIRED:
                 await self._apply_expired_billing_target(
                     api,
@@ -589,6 +658,7 @@ class RemnawaveGracePanelGateway:
                 if current_user is None:
                     raise GracePanelTransitionConflict('Canonical Remnawave user disappeared during LIMITED restore')
                 current = _panel_user_to_snapshot(current_user)
+                expected_overlay = await self._overlay_after_confirmed_deletion(api, current, expected_overlay, now=now)
                 if _panel_matches_target(current, target):
                     if _panel_user_matches_device_limit(current_user, target):
                         return
@@ -618,7 +688,7 @@ class RemnawaveGracePanelGateway:
                     current_user=current_user,
                 )
             else:
-                updated = await api.update_user(**_serialize_panel_target(billing.remnawave_id, target))
+                updated, target = await _write_recovered_billing_target(api, billing.remnawave_id, target)
         if updated is None or not _panel_user_matches_target(updated, target):
             if target.status is PanelUserStatus.LIMITED:
                 raise GracePanelTransitionConflict('Remnawave changed while canonical LIMITED state was being applied')
@@ -643,6 +713,7 @@ class RemnawaveGracePanelGateway:
         if current_user is None:
             raise GracePanelTransitionConflict('Canonical Remnawave user disappeared during EXPIRED restore')
         current = _panel_user_to_snapshot(current_user)
+        expected_overlay = await self._overlay_after_confirmed_deletion(api, current, expected_overlay, now=now)
         target = _build_billing_target(billing, now=now, panel_current=current.expire_at)
         if _panel_matches_target(current, target) and _panel_user_matches_device_limit(current_user, target):
             return
@@ -1256,15 +1327,15 @@ async def apply_recovered_grace_update_locked(
     target = _build_billing_target(billing, now=datetime.now(UTC))
     if target.status not in {PanelUserStatus.ACTIVE, PanelUserStatus.DISABLED}:
         raise GracePanelError(f'Canonical renewal unexpectedly resolved to derived panel status {target.status.value}')
-    canonical_kwargs = _serialize_panel_target(
-        billing.remnawave_id,
-        target,
-        base_kwargs=update_kwargs,
-    )
+    from app.services.traffic_accounting_service import restore_managed_grace
 
-    updated = await api.update_user(**canonical_kwargs)
-    if updated is None or not _panel_user_matches_target(updated, target):
-        raise GracePanelError('Remnawave did not confirm canonical billing state after renewal')
+    updated = await restore_managed_grace(db, subscription_id, api)
+    if updated is None:
+        updated, target = await _write_recovered_billing_target(
+            api, billing.remnawave_id, target, base_kwargs=update_kwargs
+        )
+        if updated is None or not _panel_user_matches_target(updated, target):
+            raise GracePanelError('Remnawave did not confirm canonical billing state after renewal')
 
     completed = await core.complete_after_payment(
         subscription_id,
@@ -1884,6 +1955,13 @@ async def _acquire_database_lock(db: AsyncSession, subscription_id: int) -> None
     bind = db.get_bind()
     if bind.dialect.name != 'postgresql':
         return
+    # Accounting and money acquire the owner before this advisory lease. Grace
+    # follows the same order before it can update the subscription row.
+    await db.execute(
+        select(User.id)
+        .where(User.id == select(Subscription.user_id).where(Subscription.id == subscription_id).scalar_subquery())
+        .with_for_update()
+    )
     await db.execute(
         text('SELECT pg_advisory_xact_lock_shared(:namespace, :lock_id)'),
         {
@@ -2021,6 +2099,20 @@ def _build_billing_target(
         external_squad_uuid=billing.external_squad_uuid,
         device_limit=billing.device_limit,
     )
+
+
+async def _write_recovered_billing_target(api, remnawave_id, target, *, base_kwargs=None):
+    from app.services.panel_sync.writer import write_panel_user_with_squad_recovery
+
+    updated, surviving = await write_panel_user_with_squad_recovery(
+        api, api.update_user, **_serialize_panel_target(remnawave_id, target, base_kwargs=base_kwargs)
+    )
+    if surviving is not None:
+        # Verify exactly the narrowed request authorized by a fresh catalog,
+        # never an arbitrary subset returned by the panel. Canonical DB rights
+        # remain untouched; only deleted squads are absent from this write.
+        target = replace(target, squad_uuids=surviving)
+    return updated, target
 
 
 def _serialize_panel_target(
